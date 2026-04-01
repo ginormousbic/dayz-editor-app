@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DayZ Config Editor</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; overflow: hidden; }
+  body { background: #080a0e; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0d1017; }
+  ::-webkit-scrollbar-thumb { background: #1c2230; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #2a3448; }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { opacity: 0.4; }
+  input, select, textarea, button { font-family: inherit; }
+  table { border-collapse: collapse; }
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback, useRef, useEffect } = React;
+
+// ── Storage keys ───────────────────────────────────────────────────
+const LS_API_KEY   = "dayz_editor_api_key";
+const LS_PROXY_URL = "dayz_editor_proxy_url";
+
+// ── Theme ──────────────────────────────────────────────────────────
+const T = {
+  bg:"#080a0e", panel:"#0d1017", surface:"#111520",
+  border:"#1c2230", borderBright:"#2a3448",
+  accent:"#c8a84b", accentDim:"#7a6428",
+  green:"#5dba7a", red:"#c05050", blue:"#4a8fc0",
+  text:"#8a9ab8", textBright:"#c0cce0", textDim:"#3a4a60",
+  mono:"'JetBrains Mono','Fira Mono',monospace",
+  display:"'Orbitron',monospace",
+};
+
+const FILE_DEFS = {
+  "types.xml":               {icon:"🎯",label:"Types",       desc:"Loot economy — item spawns, quantities, lifetimes"},
+  "events.xml":              {icon:"⚡",label:"Events",      desc:"Dynamic events — heli crashes, animals, vehicles"},
+  "globals.xml":             {icon:"🌐",label:"Globals",     desc:"Economy-wide multipliers and limits"},
+  "cfgspawnabletypes.xml":   {icon:"📦",label:"Spawnables",  desc:"Cargo/attachment presets per item class"},
+  "cfgeventspawns.xml":      {icon:"📍",label:"EventSpawns", desc:"Zone positions for dynamic events"},
+  "cfgplayerspawnpoints.xml":{icon:"🧍",label:"PlayerSpawns",desc:"Coastal/inland player spawn bubbles"},
+  "cfggameplay.json":        {icon:"🎮",label:"Gameplay",    desc:"Stamina, base building, inventory settings"},
+  "other":                   {icon:"📄",label:"Raw Editor",  desc:"Any other XML or JSON file"},
+};
+
+// ── Parsers ────────────────────────────────────────────────────────
+function parseTypesXML(xml) {
+  const doc = new DOMParser().parseFromString(xml,"application/xml");
+  return [...doc.querySelectorAll("type")].map(n=>{
+    const g=t=>n.querySelector(t)?.textContent??"";
+    const flags=n.querySelector("flags");
+    return {
+      name:n.getAttribute("name")??"",
+      nominal:g("nominal"),lifetime:g("lifetime"),restock:g("restock"),min:g("min"),
+      quantmin:g("quantmin"),quantmax:g("quantmax"),cost:g("cost"),
+      flags:{
+        count_in_cargo:  flags?.getAttribute("count_in_cargo") ??"0",
+        count_in_hoarder:flags?.getAttribute("count_in_hoarder")??"0",
+        count_in_map:    flags?.getAttribute("count_in_map")   ??"1",
+        count_in_player: flags?.getAttribute("count_in_player")??"0",
+        crafted:         flags?.getAttribute("crafted")        ??"0",
+        deloot:          flags?.getAttribute("deloot")         ??"0",
+      },
+      category:n.querySelector("category")?.getAttribute("name")??"",
+      usages:[...n.querySelectorAll("usage")].map(u=>u.getAttribute("name")),
+      values:[...n.querySelectorAll("value")].map(v=>v.getAttribute("name")),
+    };
+  });
+}
+function serializeTypesXML(items){
+  const L=['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>','<types>'];
+  items.forEach(i=>{
+    L.push(`    <type name="${i.name}">`);
+    ["nominal","lifetime","restock","min","quantmin","quantmax","cost"].forEach(k=>L.push(`        <${k}>${i[k]}</${k}>`));
+    const f=i.flags;
+    L.push(`        <flags count_in_cargo="${f.count_in_cargo}" count_in_hoarder="${f.count_in_hoarder}" count_in_map="${f.count_in_map}" count_in_player="${f.count_in_player}" crafted="${f.crafted}" deloot="${f.deloot}"/>`);
+    if(i.category)L.push(`        <category name="${i.category}"/>`);
+    i.usages.forEach(u=>L.push(`        <usage name="${u}"/>`));
+    i.values.forEach(v=>L.push(`        <value name="${v}"/>`));
+    L.push(`    </type>`);
+  });
+  L.push("</types>");return L.join("\n");
+}
+function parseEventsXML(xml){
+  const doc=new DOMParser().parseFromString(xml,"application/xml");
+  return [...doc.querySelectorAll("event")].map(n=>{
+    const g=t=>n.querySelector(t)?.textContent??"";
+    return {name:n.getAttribute("name")??"",nominal:g("nominal"),min:g("min"),max:g("max"),
+      lifetime:g("lifetime"),restock:g("restock"),saferadius:g("saferadius"),
+      distanceradius:g("distanceradius"),cleanupradius:g("cleanupradius"),
+      flags:g("flags"),position:g("position"),limit:g("limit"),activeplayers:g("activeplayers")};
+  });
+}
+function serializeEventsXML(items){
+  const L=['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>','<events>'];
+  items.forEach(i=>{
+    L.push(`    <event name="${i.name}">`);
+    ["nominal","min","max","lifetime","restock","saferadius","distanceradius","cleanupradius","flags","position","limit","activeplayers"]
+      .forEach(k=>{if(i[k]!==undefined&&i[k]!=="")L.push(`        <${k}>${i[k]}</${k}>`);});
+    L.push(`    </event>`);
+  });
+  L.push("</events>");return L.join("\n");
+}
+function parseGlobalsXML(xml){
+  const doc=new DOMParser().parseFromString(xml,"application/xml");
+  return [...doc.querySelectorAll("var")].map(n=>({name:n.getAttribute("name")??"",type:n.getAttribute("type")??"",value:n.getAttribute("value")??""  }));
+}
+function serializeGlobalsXML(items){
+  const L=['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>','<globals>'];
+  items.forEach(i=>L.push(`    <var name="${i.name}" type="${i.type}" value="${i.value}"/>`));
+  L.push("</globals>");return L.join("\n");
+}
+function parsePlayerSpawnsXML(xml){
+  const doc=new DOMParser().parseFromString(xml,"application/xml");
+  return [...doc.querySelectorAll("spawnpoint")].map((n,idx)=>({id:idx,x:n.getAttribute("x")??"",z:n.getAttribute("z")??"",a:n.getAttribute("a")??"",r:n.getAttribute("r")??""  }));
+}
+function serializePlayerSpawnsXML(items){
+  const L=['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>','<spawnpointsdata>','  <spawnpoints>'];
+  items.forEach(i=>L.push(`        <spawnpoint x="${i.x}" z="${i.z}" a="${i.a}" r="${i.r}"/>`));
+  L.push("  </spawnpoints>","</spawnpointsdata>");return L.join("\n");
+}
+
+// ── Utils ──────────────────────────────────────────────────────────
+function dl(content,filename){
+  const a=Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob([content],{type:"text/plain"})),download:filename});
+  a.click();URL.revokeObjectURL(a.href);
+}
+function detectFileType(filename){
+  const l=filename.toLowerCase();
+  if(l==="types.xml")return"types.xml";
+  if(l==="events.xml")return"events.xml";
+  if(l==="globals.xml")return"globals.xml";
+  if(l==="cfgspawnabletypes.xml")return"cfgspawnabletypes.xml";
+  if(l==="cfgeventspawns.xml")return"cfgeventspawns.xml";
+  if(l==="cfgplayerspawnpoints.xml")return"cfgplayerspawnpoints.xml";
+  if(l==="cfggameplay.json")return"cfggameplay.json";
+  return"other";
+}
+function deepClone(x){return JSON.parse(JSON.stringify(x));}
+
+// ── UI Atoms ───────────────────────────────────────────────────────
+const Btn=({onClick,children,variant="default",small,disabled,full})=>{
+  const v={
+    default:{bg:T.surface,color:T.text,border:T.border},
+    accent:{bg:T.accent,color:T.bg,border:T.accent},
+    danger:{bg:"transparent",color:T.red,border:"#3a1a1a"},
+    ghost:{bg:"transparent",color:T.textDim,border:"transparent"},
+    outline:{bg:"transparent",color:T.accent,border:T.accentDim},
+  }[variant];
+  return(
+    <button onClick={onClick} disabled={disabled} style={{
+      background:v.bg,color:v.color,border:`1px solid ${v.border}`,borderRadius:6,
+      padding:small?"4px 10px":"6px 14px",fontFamily:T.mono,fontSize:small?10:11,
+      letterSpacing:1,cursor:disabled?"default":"pointer",opacity:disabled?0.4:1,
+      transition:"all .15s",width:full?"100%":"auto",
+    }}>{children}</button>
+  );
+};
+const Tag=({children,color=T.textDim})=>(
+  <span style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:4,padding:"1px 7px",fontFamily:T.mono,fontSize:10,color}}>{children}</span>
+);
+const Toggle=({value,onChange})=>(
+  <button onClick={()=>onChange(value==="1"?"0":"1")} style={{width:36,height:18,borderRadius:9,border:"none",cursor:"pointer",background:value==="1"?T.accent:T.surface,position:"relative",transition:"background .2s",flexShrink:0}}>
+    <div style={{width:12,height:12,borderRadius:"50%",background:T.bg,position:"absolute",top:3,left:value==="1"?21:3,transition:"left .2s"}}/>
+  </button>
+);
+const NumInput=({value,onChange,width=70,highlight})=>(
+  <input type="number" value={value} onChange={e=>onChange(e.target.value)} style={{width,background:"transparent",border:`1px solid ${highlight?T.accentDim:T.border}`,borderRadius:4,color:highlight?T.accent:T.text,fontFamily:T.mono,fontSize:12,textAlign:"center",padding:"3px 4px"}}/>
+);
+const TxtInput=({value,onChange,placeholder,full,password})=>(
+  <input type={password?"password":"text"} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{width:full?"100%":"auto",background:T.surface,border:`1px solid ${T.border}`,borderRadius:6,padding:"6px 12px",fontFamily:T.mono,fontSize:12,color:T.textBright,outline:"none",boxSizing:"border-box"}}/>
+);
+
+// ── API Key Setup Modal ────────────────────────────────────────────
+function ApiKeyModal({onSave, onSkip}) {
+  const [key,setKey]=useState("");
+  const [proxy,setProxy]=useState("");
+  const [showKey,setShowKey]=useState(false);
+  const [testing,setTesting]=useState(false);
+  const [testResult,setTestResult]=useState(null);
+
+  const testConnection = async () => {
+    if (!key.trim()) return;
+    setTesting(true); setTestResult(null);
+    try {
+      const endpoint = proxy.trim() || "https://api.anthropic.com/v1/messages";
+      const res = await fetch(endpoint, {
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":key.trim(),"anthropic-version":"2023-06-01"},
+        body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:10,messages:[{role:"user",content:"hi"}]})
+      });
+      const data = await res.json();
+      if (data.content) setTestResult("success");
+      else setTestResult("error: "+(data.error?.message||"unknown"));
+    } catch(e) {
+      setTestResult("error: "+e.message);
+    }
+    setTesting(false);
+  };
+
+  const save = () => {
+    if (!key.trim()) return;
+    localStorage.setItem(LS_API_KEY, key.trim());
+    if (proxy.trim()) localStorage.setItem(LS_PROXY_URL, proxy.trim());
+    else localStorage.removeItem(LS_PROXY_URL);
+    onSave(key.trim(), proxy.trim());
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div style={{background:T.panel,border:`1px solid ${T.borderBright}`,borderRadius:14,padding:36,width:480,maxWidth:"95vw"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+          <div style={{fontFamily:T.display,fontSize:16,color:T.accent,letterSpacing:4}}>AI SETUP</div>
+          <button onClick={onSkip} style={{background:"transparent",border:"none",cursor:"pointer",fontFamily:T.mono,fontSize:10,color:T.textDim,letterSpacing:1,padding:"2px 0"}}>SKIP, I DON'T NEED AI →</button>
+        </div>
+        <div style={{fontFamily:T.mono,fontSize:11,color:T.textDim,marginBottom:28,lineHeight:1.7}}>
+          The AI assistant is optional — the file editor works fully without it.<br/>
+          To enable AI, enter your Anthropic API key below. Your key is saved only in this browser.
+        </div>
+
+        {/* API Key */}
+        <div style={{marginBottom:20}}>
+          <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>Anthropic API Key</div>
+          <div style={{display:"flex",gap:8}}>
+            <input
+              type={showKey?"text":"password"} value={key} onChange={e=>setKey(e.target.value)}
+              placeholder="sk-ant-api03-..."
+              style={{flex:1,background:T.surface,border:`1px solid ${T.border}`,borderRadius:6,padding:"8px 12px",fontFamily:T.mono,fontSize:12,color:T.textBright,outline:"none"}}
+            />
+            <Btn onClick={()=>setShowKey(s=>!s)} small>{showKey?"Hide":"Show"}</Btn>
+          </div>
+          <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginTop:6}}>
+            Get one at <span style={{color:T.accent}}>console.anthropic.com</span> → API Keys
+          </div>
+        </div>
+
+        {/* Proxy URL */}
+        <div style={{marginBottom:24}}>
+          <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>
+            Cloudflare Proxy URL <span style={{color:"#334",letterSpacing:0,textTransform:"none"}}>(optional — needed if CORS errors occur)</span>
+          </div>
+          <TxtInput value={proxy} onChange={setProxy} placeholder="https://your-worker.workers.dev" full />
+          <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginTop:6}}>Leave blank to try direct API first. See the setup guide below.</div>
+        </div>
+
+        {/* Test + Save */}
+        <div style={{display:"flex",gap:8,marginBottom:16}}>
+          <Btn onClick={testConnection} variant="outline" disabled={!key.trim()||testing}>
+            {testing?"Testing…":"Test Connection"}
+          </Btn>
+          <Btn onClick={save} variant="accent" disabled={!key.trim()} full>Save & Continue →</Btn>
+        </div>
+
+        {testResult&&(
+          <div style={{fontFamily:T.mono,fontSize:11,padding:"8px 12px",borderRadius:6,background:testResult==="success"?"rgba(93,186,122,0.1)":"rgba(192,80,80,0.1)",border:`1px solid ${testResult==="success"?T.green:T.red}`,color:testResult==="success"?T.green:T.red,marginBottom:16}}>
+            {testResult==="success"?"✅ Connection successful! AI chat is ready.":"❌ "+testResult}
+          </div>
+        )}
+
+        {/* Proxy setup guide */}
+        <details style={{marginTop:8}}>
+          <summary style={{fontFamily:T.mono,fontSize:10,color:T.textDim,cursor:"pointer",letterSpacing:1}}>▶ CLOUDFLARE WORKER SETUP GUIDE (click to expand)</summary>
+          <div style={{marginTop:12,fontFamily:T.mono,fontSize:10,color:T.textDim,lineHeight:2,background:T.surface,borderRadius:8,padding:14}}>
+            <div style={{color:T.textBright,marginBottom:8}}>Only needed if you get CORS errors without a proxy:</div>
+            <div>1. Go to <span style={{color:T.accent}}>workers.cloudflare.com</span> → sign up free</div>
+            <div>2. Create a new Worker → paste the worker code (see README)</div>
+            <div>3. Deploy it — you'll get a URL like <span style={{color:T.accent}}>https://dayz-proxy.yourname.workers.dev</span></div>
+            <div>4. Paste that URL in the Proxy field above</div>
+            <div style={{marginTop:8,color:T.green}}>Worker code is included in the README on your GitHub repo.</div>
+          </div>
+        </details>
+      </div>
+    </div>
+  );
+}
+
+// ── Settings Modal ─────────────────────────────────────────────────
+function SettingsModal({apiKey,proxyUrl,onSave,onClose}) {
+  const [key,setKey]=useState(apiKey||"");
+  const [proxy,setProxy]=useState(proxyUrl||"");
+  const [showKey,setShowKey]=useState(false);
+  const [testing,setTesting]=useState(false);
+  const [testResult,setTestResult]=useState(null);
+
+  const testConnection = async () => {
+    if (!key.trim()) return;
+    setTesting(true); setTestResult(null);
+    try {
+      const endpoint = proxy.trim() || "https://api.anthropic.com/v1/messages";
+      const res = await fetch(endpoint,{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":key.trim(),"anthropic-version":"2023-06-01"},
+        body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:10,messages:[{role:"user",content:"hi"}]})
+      });
+      const data=await res.json();
+      setTestResult(data.content?"success":"error: "+(data.error?.message||"unknown"));
+    } catch(e){setTestResult("error: "+e.message);}
+    setTesting(false);
+  };
+
+  const save=()=>{
+    localStorage.setItem(LS_API_KEY,key.trim());
+    if(proxy.trim())localStorage.setItem(LS_PROXY_URL,proxy.trim());
+    else localStorage.removeItem(LS_PROXY_URL);
+    onSave(key.trim(),proxy.trim());
+    onClose();
+  };
+
+  const clearKey=()=>{
+    if(confirm("Clear saved API key?")){
+      localStorage.removeItem(LS_API_KEY);
+      localStorage.removeItem(LS_PROXY_URL);
+      onSave("","");
+      onClose();
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:T.panel,border:`1px solid ${T.borderBright}`,borderRadius:14,padding:32,width:440,maxWidth:"95vw"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+          <div style={{fontFamily:T.display,fontSize:14,color:T.accent,letterSpacing:3}}>SETTINGS</div>
+          <Btn onClick={onClose} small ghost>✕</Btn>
+        </div>
+
+        <div style={{marginBottom:18}}>
+          <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>API Key</div>
+          <div style={{display:"flex",gap:8}}>
+            <input type={showKey?"text":"password"} value={key} onChange={e=>setKey(e.target.value)}
+              style={{flex:1,background:T.surface,border:`1px solid ${T.border}`,borderRadius:6,padding:"7px 12px",fontFamily:T.mono,fontSize:12,color:T.textBright,outline:"none"}}
+            />
+            <Btn onClick={()=>setShowKey(s=>!s)} small>{showKey?"Hide":"Show"}</Btn>
+          </div>
+        </div>
+
+        <div style={{marginBottom:20}}>
+          <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>Proxy URL</div>
+          <TxtInput value={proxy} onChange={setProxy} placeholder="https://your-worker.workers.dev" full />
+        </div>
+
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          <Btn onClick={testConnection} variant="outline" disabled={!key.trim()||testing}>{testing?"Testing…":"Test"}</Btn>
+          <Btn onClick={save} variant="accent" disabled={!key.trim()}>Save Changes</Btn>
+          <Btn onClick={clearKey} variant="danger" small>Clear Key</Btn>
+        </div>
+
+        {testResult&&(
+          <div style={{fontFamily:T.mono,fontSize:11,padding:"7px 12px",borderRadius:6,background:testResult==="success"?"rgba(93,186,122,0.1)":"rgba(192,80,80,0.1)",border:`1px solid ${testResult==="success"?T.green:T.red}`,color:testResult==="success"?T.green:T.red}}>
+            {testResult==="success"?"✅ Connected!":"❌ "+testResult}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Types Editor ───────────────────────────────────────────────────
+const TYPES_META={
+  nominal:{label:"Nominal",desc:"Target spawn count on the map at any time."},
+  min:{label:"Min",desc:"Minimum count before restock triggers."},
+  lifetime:{label:"Lifetime (s)",desc:"Seconds before the item despawns from the world."},
+  restock:{label:"Restock (s)",desc:"Seconds between restock checks (0 = instant)."},
+  quantmin:{label:"Qty Min",desc:"Minimum quantity/ammo on spawn (-1 = ignore)."},
+  quantmax:{label:"Qty Max",desc:"Maximum quantity/ammo on spawn (-1 = ignore)."},
+  cost:{label:"Cost",desc:"CE scheduler priority cost."},
+};
+
+function TypesEditor({items,originals,onChange}){
+  const [search,setSearch]=useState("");
+  const [cat,setCat]=useState("All");
+  const [changedOnly,setChangedOnly]=useState(false);
+  const [selected,setSelected]=useState(null);
+
+  const cats=["All",...new Set(items.map(i=>i.category).filter(Boolean))];
+  const filtered=items.filter(i=>{
+    const ms=i.name.toLowerCase().includes(search.toLowerCase());
+    const mc=cat==="All"||i.category===cat;
+    const mch=!changedOnly||JSON.stringify(i)!==JSON.stringify(originals.find(o=>o.name===i.name));
+    return ms&&mc&&mch;
+  });
+  const selItem=selected?items.find(i=>i.name===selected):null;
+  const selOrig=selected?originals.find(i=>i.name===selected):null;
+  const changeCount=items.filter(i=>JSON.stringify(i)!==JSON.stringify(originals.find(o=>o.name===i.name))).length;
+
+  return(
+    <div style={{display:"flex",height:"100%",overflow:"hidden"}}>
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",borderRight:`1px solid ${T.border}`}}>
+        <div style={{padding:"10px 14px",borderBottom:`1px solid ${T.border}`,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",flexShrink:0}}>
+          <TxtInput value={search} onChange={setSearch} placeholder="🔍 Search items…"/>
+          <select value={cat} onChange={e=>setCat(e.target.value)} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:6,padding:"6px 10px",fontFamily:T.mono,fontSize:11,color:T.text,outline:"none"}}>
+            {cats.map(c=><option key={c}>{c}</option>)}
+          </select>
+          <label style={{fontFamily:T.mono,fontSize:11,color:T.textDim,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
+            <input type="checkbox" checked={changedOnly} onChange={e=>setChangedOnly(e.target.checked)}/>
+            Changed only {changeCount>0&&<Tag color={T.green}>+{changeCount}</Tag>}
+          </label>
+          <span style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginLeft:"auto"}}>{filtered.length} items</span>
+        </div>
+        <div style={{flex:1,overflowY:"auto"}}>
+          <table style={{width:"100%"}}>
+            <thead>
+              <tr style={{background:T.bg,position:"sticky",top:0,zIndex:1}}>
+                {["NAME","NOMINAL","MIN","LIFETIME","RESTOCK","CATEGORY"].map(h=>(
+                  <th key={h} style={{padding:"7px 10px",textAlign:h==="NAME"?"left":"center",fontFamily:T.mono,fontSize:9,color:T.textDim,letterSpacing:2,fontWeight:"normal",borderBottom:`1px solid ${T.border}`}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(item=>{
+                const orig=originals.find(o=>o.name===item.name);
+                const changed=JSON.stringify(item)!==JSON.stringify(orig);
+                const isSel=selected===item.name;
+                return(
+                  <tr key={item.name} onClick={()=>setSelected(item.name)} style={{background:isSel?"rgba(200,168,75,0.07)":changed?"rgba(93,186,122,0.04)":"transparent",cursor:"pointer",borderBottom:`1px solid ${T.bg}`}}>
+                    <td style={{padding:"6px 10px",fontFamily:T.mono,fontSize:11,color:changed?T.green:T.text,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {changed&&<span style={{marginRight:5}}>●</span>}{item.name}
+                    </td>
+                    {["nominal","min","lifetime","restock"].map(f=>(
+                      <td key={f} style={{padding:"5px 6px",textAlign:"center"}}>
+                        <NumInput value={item[f]} highlight={item[f]!==orig?.[f]} onChange={v=>onChange(item.name,f,v)} width={60}/>
+                      </td>
+                    ))}
+                    <td style={{padding:"6px 8px",textAlign:"center",fontFamily:T.mono,fontSize:10,color:T.textDim}}>{item.category||"—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div style={{width:270,background:T.panel,overflowY:"auto",flexShrink:0}}>
+        {selItem?(
+          <div style={{padding:20}}>
+            <div style={{fontFamily:T.display,fontSize:12,color:T.accent,marginBottom:4,wordBreak:"break-all"}}>{selItem.name}</div>
+            <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginBottom:18}}>{selItem.category||"no category"}</div>
+            <div style={{fontFamily:T.mono,fontSize:9,color:T.textDim,letterSpacing:2,marginBottom:12,textTransform:"uppercase"}}>Spawn Values</div>
+            {Object.entries(TYPES_META).map(([k,m])=>(
+              <div key={k} style={{marginBottom:13}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                  <span style={{fontFamily:T.mono,fontSize:11,color:selItem[k]!==selOrig?.[k]?T.accent:T.text}}>{m.label}</span>
+                  <NumInput value={selItem[k]} highlight={selItem[k]!==selOrig?.[k]} onChange={v=>onChange(selItem.name,k,v)} width={80}/>
+                </div>
+                <div style={{fontFamily:T.mono,fontSize:9,color:T.textDim,lineHeight:1.5}}>{m.desc}</div>
+              </div>
+            ))}
+            <div style={{marginTop:18,paddingTop:14,borderTop:`1px solid ${T.border}`}}>
+              <div style={{fontFamily:T.mono,fontSize:9,color:T.textDim,letterSpacing:2,marginBottom:10,textTransform:"uppercase"}}>Flags</div>
+              {Object.entries(selItem.flags).map(([flag,val])=>(
+                <div key={flag} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:9}}>
+                  <span style={{fontFamily:T.mono,fontSize:10,color:T.textDim}}>{flag}</span>
+                  <Toggle value={val} onChange={v=>onChange(selItem.name,`flags.${flag}`,v)}/>
+                </div>
+              ))}
+            </div>
+            {selItem.usages.length>0&&(
+              <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${T.border}`}}>
+                <div style={{fontFamily:T.mono,fontSize:9,color:T.textDim,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>Usages</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{selItem.usages.map(u=><Tag key={u}>{u}</Tag>)}</div>
+              </div>
+            )}
+          </div>
+        ):(
+          <div style={{padding:40,textAlign:"center",fontFamily:T.mono,fontSize:11,color:T.textDim}}>← Select an item to edit details</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Events Editor ──────────────────────────────────────────────────
+const EVENT_DESC={
+  nominal:"Target active count on the map.",min:"Min before CE spawns more.",max:"Hard cap on simultaneous events.",
+  lifetime:"Seconds before spawned event despawns.",restock:"Seconds between restock cycles.",
+  saferadius:"Radius (m) around players where event won't spawn.",
+  distanceradius:"Min distance (m) between events of this type.",
+  cleanupradius:"Radius (m) for item cleanup after event ends.",
+  activeplayers:"Min active players required (0 = always).",
+};
+function EventsEditor({items,originals,onChange}){
+  const [search,setSearch]=useState("");const [selected,setSelected]=useState(null);
+  const filtered=items.filter(i=>i.name.toLowerCase().includes(search.toLowerCase()));
+  const selItem=selected?items.find(i=>i.name===selected):null;
+  const selOrig=selected?originals.find(i=>i.name===selected):null;
+  return(
+    <div style={{display:"flex",height:"100%",overflow:"hidden"}}>
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",borderRight:`1px solid ${T.border}`}}>
+        <div style={{padding:"10px 14px",borderBottom:`1px solid ${T.border}`,flexShrink:0,display:"flex",gap:8,alignItems:"center"}}>
+          <TxtInput value={search} onChange={setSearch} placeholder="🔍 Search events…"/>
+          <span style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginLeft:"auto"}}>{filtered.length} events</span>
+        </div>
+        <div style={{flex:1,overflowY:"auto"}}>
+          <table style={{width:"100%"}}>
+            <thead><tr style={{background:T.bg,position:"sticky",top:0}}>
+              {["NAME","NOMINAL","MIN","MAX","LIFETIME","RESTOCK"].map(h=>(
+                <th key={h} style={{padding:"7px 10px",textAlign:h==="NAME"?"left":"center",fontFamily:T.mono,fontSize:9,color:T.textDim,letterSpacing:2,fontWeight:"normal",borderBottom:`1px solid ${T.border}`}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {filtered.map(item=>{
+                const orig=originals.find(o=>o.name===item.name);
+                const changed=JSON.stringify(item)!==JSON.stringify(orig);
+                return(
+                  <tr key={item.name} onClick={()=>setSelected(item.name)} style={{background:selected===item.name?"rgba(200,168,75,0.07)":changed?"rgba(93,186,122,0.04)":"transparent",cursor:"pointer",borderBottom:`1px solid ${T.bg}`}}>
+                    <td style={{padding:"6px 10px",fontFamily:T.mono,fontSize:11,color:changed?T.green:T.text,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{changed&&<span style={{marginRight:5}}>●</span>}{item.name}</td>
+                    {["nominal","min","max","lifetime","restock"].map(f=>(
+                      <td key={f} style={{padding:"5px 6px",textAlign:"center"}}>
+                        <NumInput value={item[f]??""} highlight={item[f]!==orig?.[f]} onChange={v=>onChange(item.name,f,v)} width={60}/>
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div style={{width:280,background:T.panel,overflowY:"auto",flexShrink:0}}>
+        {selItem?(
+          <div style={{padding:20}}>
+            <div style={{fontFamily:T.display,fontSize:12,color:T.accent,marginBottom:18,wordBreak:"break-all"}}>{selItem.name}</div>
+            {Object.keys(EVENT_DESC).map(k=>(
+              <div key={k} style={{marginBottom:13}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                  <span style={{fontFamily:T.mono,fontSize:11,color:selItem[k]!==selOrig?.[k]?T.accent:T.text}}>{k}</span>
+                  <NumInput value={selItem[k]??""} highlight={selItem[k]!==selOrig?.[k]} onChange={v=>onChange(selItem.name,k,v)} width={80}/>
+                </div>
+                <div style={{fontFamily:T.mono,fontSize:9,color:T.textDim,lineHeight:1.5}}>{EVENT_DESC[k]}</div>
+              </div>
+            ))}
+          </div>
+        ):(
+          <div style={{padding:40,textAlign:"center",fontFamily:T.mono,fontSize:11,color:T.textDim}}>← Select an event to edit</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Globals Editor ─────────────────────────────────────────────────
+const GLOBALS_DESC={
+  CleanupLifetimeDeadAnimal:"Lifetime of dead animal carcasses (seconds).",
+  CleanupLifetimeDeadInfected:"Lifetime of dead zombie corpses (seconds).",
+  CleanupLifetimeDeadPlayer:"Lifetime of dead player corpses (seconds).",
+  CleanupLifetimeDefault:"Default despawn timer for items without a specific lifetime.",
+  CleanupLifetimeLimit:"Max lifetime for any item — hard cap.",
+  CleanupLifetimeRuined:"How long ruined items persist before despawning.",
+  CountDamageRuined:"Count ruined items toward nominal counts (1=yes).",
+  FlagRefreshFrequency:"How often (seconds) flag poles are checked/refreshed.",
+  FlagRefreshMaxDuration:"Max seconds a flag can keep territory alive without refresh.",
+  IdleModeCountdown:"Seconds before idle mode activates on low player count.",
+  IdleModeStartup:"Startup delay (seconds) for idle mode.",
+  InitialSpawn:"% of nominal spawned on server start (100 = full economy).",
+  LootDamageMax:"Maximum damage (0–1) applied to spawned loot.",
+  LootDamageMin:"Minimum damage (0–1) applied to spawned loot.",
+  LootInitial:"% of lifetime remaining when loot first spawns.",
+  LootProxyPlaceholder:"Enables proxy loot placeholder system (1=yes).",
+  RestartSpawn:"% of nominal spawned after each server restart.",
+  SpawnInitial:"Seconds after server start before CE first runs.",
+  TimeHopping:"Cooldown (seconds) to prevent server hopping exploitation.",
+  WorldWetTempUpdate:"How often (seconds) the weather/wet system updates.",
+  ZombieMaxCount:"Global hard cap on simultaneous infected/zombies.",
+  ZombieNominalCount:"Nominal zombie count the CE targets across the map.",
+};
+function GlobalsEditor({items,originals,onChange}){
+  const [search,setSearch]=useState("");
+  const filtered=items.filter(i=>i.name.toLowerCase().includes(search.toLowerCase()));
+  const cc=items.filter((i,idx)=>i.value!==originals[idx]?.value).length;
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div style={{padding:"10px 14px",borderBottom:`1px solid ${T.border}`,flexShrink:0,display:"flex",gap:8,alignItems:"center"}}>
+        <TxtInput value={search} onChange={setSearch} placeholder="🔍 Search variables…"/>
+        {cc>0&&<Tag color={T.green}>+{cc} changed</Tag>}
+        <span style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginLeft:"auto"}}>{filtered.length} vars</span>
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:16,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,alignContent:"start"}}>
+        {filtered.map(item=>{
+          const orig=originals.find(o=>o.name===item.name);
+          const changed=item.value!==orig?.value;
+          return(
+            <div key={item.name} style={{background:T.surface,border:`1px solid ${changed?T.accentDim:T.border}`,borderRadius:8,padding:"12px 14px"}}>
+              <div style={{fontFamily:T.mono,fontSize:11,color:changed?T.accent:T.textBright,marginBottom:4}}>{item.name}</div>
+              <div style={{fontFamily:T.mono,fontSize:9,color:T.textDim,marginBottom:10,lineHeight:1.5}}>{GLOBALS_DESC[item.name]||`Type: ${item.type}`}</div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <input type="number" value={item.value} onChange={e=>onChange(item.name,"value",e.target.value)}
+                  style={{flex:1,background:T.panel,border:`1px solid ${changed?T.accentDim:T.border}`,borderRadius:4,padding:"5px 8px",fontFamily:T.mono,fontSize:12,color:changed?T.accent:T.text,outline:"none"}}
+                />
+                {changed&&<span style={{fontSize:9,fontFamily:T.mono,color:T.textDim}}>{orig?.value}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Player Spawns Editor ───────────────────────────────────────────
+function PlayerSpawnsEditor({items,originals,onChange,onAdd,onDelete}){
+  const [search,setSearch]=useState("");
+  const filtered=items.filter(i=>`${i.x} ${i.z}`.includes(search));
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div style={{padding:"10px 14px",borderBottom:`1px solid ${T.border}`,flexShrink:0,display:"flex",gap:8,alignItems:"center"}}>
+        <TxtInput value={search} onChange={setSearch} placeholder="🔍 Filter coordinates…"/>
+        <Btn onClick={onAdd} small variant="accent">+ Add Spawn</Btn>
+        <span style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginLeft:"auto"}}>{filtered.length} spawn points</span>
+      </div>
+      <div style={{flex:1,overflowY:"auto"}}>
+        <table style={{width:"100%"}}>
+          <thead><tr style={{background:T.bg,position:"sticky",top:0}}>
+            {["#","X","Z","Angle","Radius",""].map(h=>(
+              <th key={h} style={{padding:"7px 10px",textAlign:"center",fontFamily:T.mono,fontSize:9,color:T.textDim,letterSpacing:2,fontWeight:"normal",borderBottom:`1px solid ${T.border}`}}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {filtered.map((item,i)=>{
+              const orig=originals[i];const changed=JSON.stringify(item)!==JSON.stringify(orig);
+              return(
+                <tr key={item.id} style={{borderBottom:`1px solid ${T.bg}`,background:changed?"rgba(93,186,122,0.04)":"transparent"}}>
+                  <td style={{padding:"6px 10px",textAlign:"center",fontFamily:T.mono,fontSize:10,color:T.textDim}}>{i+1}</td>
+                  {["x","z","a","r"].map(f=>(
+                    <td key={f} style={{padding:"5px 6px",textAlign:"center"}}>
+                      <input type="text" value={item[f]} onChange={e=>onChange(item.id,f,e.target.value)}
+                        style={{width:100,background:"transparent",border:`1px solid ${item[f]!==orig?.[f]?T.accentDim:T.border}`,borderRadius:4,color:item[f]!==orig?.[f]?T.accent:T.text,fontFamily:T.mono,fontSize:11,textAlign:"center",padding:"3px 6px"}}
+                      />
+                    </td>
+                  ))}
+                  <td style={{padding:"5px 8px",textAlign:"center"}}><Btn onClick={()=>onDelete(item.id)} small variant="danger">✕</Btn></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Raw Editor ─────────────────────────────────────────────────────
+function RawEditor({content,onChange}){
+  return(
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <div style={{padding:"8px 14px",borderBottom:`1px solid ${T.border}`,flexShrink:0,fontFamily:T.mono,fontSize:10,color:T.textDim}}>Raw text editor — edit directly, export when ready</div>
+      <textarea value={content} onChange={e=>onChange(e.target.value)} style={{flex:1,background:T.panel,border:"none",outline:"none",resize:"none",fontFamily:T.mono,fontSize:12,color:T.textBright,padding:16,lineHeight:1.7}}/>
+    </div>
+  );
+}
+
+// ── Diff Panel ─────────────────────────────────────────────────────
+function DiffPanel({items,originals}){
+  if(typeof items==="string"){
+    const changed=items!==originals;
+    return <div style={{padding:32,fontFamily:T.mono,fontSize:12,color:changed?T.green:T.textDim,textAlign:"center"}}>{changed?"File has unsaved changes. Export to apply.":"No changes."}</div>;
+  }
+  const changes=items.filter(item=>{
+    const orig=originals.find(o=>o.name===item.name);
+    return orig&&JSON.stringify(item)!==JSON.stringify(orig);
+  });
+  if(!changes.length)return <div style={{padding:32,textAlign:"center",fontFamily:T.mono,fontSize:12,color:T.textDim}}>No changes yet.</div>;
+  return(
+    <div style={{padding:16,overflowY:"auto",height:"100%"}}>
+      {changes.map(item=>{
+        const orig=originals.find(o=>o.name===item.name);
+        const diffFields=Object.keys(item).filter(k=>k!=="flags"&&k!=="usages"&&k!=="values"&&item[k]!==orig[k]);
+        const flagDiffs=item.flags?Object.entries(item.flags).filter(([k,v])=>v!==orig.flags?.[k]):[];
+        return(
+          <div key={item.name} style={{marginBottom:12,background:T.surface,borderRadius:8,padding:12,border:`1px solid ${T.border}`}}>
+            <div style={{fontFamily:T.mono,fontSize:12,color:T.green,marginBottom:8}}>{item.name}</div>
+            {diffFields.map(k=>(
+              <div key={k} style={{fontFamily:T.mono,fontSize:11,color:T.textDim,marginBottom:3}}>
+                <span style={{color:"#667"}}>{k}: </span><span style={{color:T.red}}>{orig[k]}</span><span style={{color:T.textDim}}> → </span><span style={{color:T.green}}>{item[k]}</span>
+              </div>
+            ))}
+            {flagDiffs.map(([k,v])=>(
+              <div key={k} style={{fontFamily:T.mono,fontSize:11,color:T.textDim,marginBottom:3}}>
+                <span style={{color:"#667"}}>flags.{k}: </span><span style={{color:T.red}}>{orig.flags[k]}</span><span style={{color:T.textDim}}> → </span><span style={{color:T.green}}>{v}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── AI Chat ────────────────────────────────────────────────────────
+function AIChat({fileType,items,onBulkApply,apiKey,proxyUrl}){
+  const [msgs,setMsgs]=useState([
+    {role:"assistant",text:`I know your ${fileType} — ask me anything, or try bulk commands like "double all nominals" or "set zombie count to 500".`}
+  ]);
+  const [input,setInput]=useState("");
+  const [loading,setLoading]=useState(false);
+  const bottomRef=useRef();
+  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[msgs]);
+
+  const send=async()=>{
+    if(!input.trim()||loading)return;
+    if(!apiKey){setMsgs(m=>[...m,{role:"assistant",text:"⚠️ No API key set. Click ⚙️ Settings in the top bar to add your Anthropic API key."}]);return;}
+    const userMsg=input.trim();setInput("");
+    setMsgs(m=>[...m,{role:"user",text:userMsg}]);setLoading(true);
+
+    const sample=Array.isArray(items)?items.slice(0,40).map(i=>i.name||JSON.stringify(i)).join(", "):JSON.stringify(items).slice(0,600);
+    const system=`You are a DayZ server admin AI assistant. The user has loaded: ${fileType}
+Sample entries: ${sample}
+Total: ${Array.isArray(items)?items.length:"N/A"}
+Answer questions, explain fields, give tuning advice, and apply bulk edits.
+For bulk edits use EXACTLY this format:
+<BULK_EDIT>[{"name":"ItemName","field":"nominal","value":"5"}]</BULK_EDIT>
+Be concise. Explain bulk edits briefly before the block.`;
+
+    try {
+      const endpoint=proxyUrl||"https://api.anthropic.com/v1/messages";
+      const headers={"Content-Type":"application/json","anthropic-version":"2023-06-01"};
+      if(!proxyUrl)headers["x-api-key"]=apiKey;
+      else headers["x-api-key"]=apiKey;
+
+      const res=await fetch(endpoint,{
+        method:"POST",headers,
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",max_tokens:1000,system,
+          messages:[
+            ...msgs.slice(1).map(m=>({role:m.role==="assistant"?"assistant":"user",content:m.text})),
+            {role:"user",content:userMsg}
+          ],
+        })
+      });
+      const data=await res.json();
+      if(data.error)throw new Error(data.error.message);
+      let text=data.content?.map(c=>c.text||"").join("")||"No response.";
+      const bulkMatch=text.match(/<BULK_EDIT>([\s\S]*?)<\/BULK_EDIT>/);
+      let display=text.replace(/<BULK_EDIT>[\s\S]*?<\/BULK_EDIT>/,"").trim();
+      if(bulkMatch&&onBulkApply){
+        try{const edits=JSON.parse(bulkMatch[1].trim());onBulkApply(edits);display+=`\n\n✅ Applied ${edits.length} bulk edit(s).`;}
+        catch{display+="\n\n⚠️ Couldn't parse bulk edit.";}
+      }
+      setMsgs(m=>[...m,{role:"assistant",text:display}]);
+    }catch(e){
+      setMsgs(m=>[...m,{role:"assistant",text:`❌ Error: ${e.message}\n\nIf you're seeing CORS errors, set up a Cloudflare Worker proxy in ⚙️ Settings.`}]);
+    }
+    setLoading(false);
+  };
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",background:T.bg}}>
+      <div style={{flex:1,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:10}}>
+        {msgs.map((m,i)=>(
+          <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+            <div style={{maxWidth:"88%",padding:"10px 14px",borderRadius:10,background:m.role==="user"?"#152030":T.surface,border:`1px solid ${m.role==="user"?"#1e3a50":T.border}`,fontFamily:T.mono,fontSize:12,color:m.role==="user"?"#90b8d8":T.text,lineHeight:1.7,whiteSpace:"pre-wrap"}}>{m.text}</div>
+          </div>
+        ))}
+        {loading&&<div style={{display:"flex"}}><div style={{padding:"10px 14px",borderRadius:10,background:T.surface,border:`1px solid ${T.border}`,fontFamily:T.mono,fontSize:12,color:T.accent}}>▋</div></div>}
+        <div ref={bottomRef}/>
+      </div>
+      <div style={{padding:12,borderTop:`1px solid ${T.border}`,display:"flex",gap:8}}>
+        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()}
+          placeholder={apiKey?`Ask about ${fileType}…`:"Add API key in ⚙️ Settings to use AI…"}
+          style={{flex:1,background:T.surface,border:`1px solid ${T.border}`,borderRadius:8,padding:"8px 14px",fontFamily:T.mono,fontSize:12,color:T.textBright,outline:"none"}}
+        />
+        <Btn onClick={send} variant="accent" disabled={loading}>{loading?"…":"Send"}</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ── Load Screen ────────────────────────────────────────────────────
+function LoadScreen({onLoad}){
+  const [drag,setDrag]=useState(false);const ref=useRef();
+  const handleFile=file=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const content=e.target.result;const type=detectFileType(file.name);let parsed=content;
+      try{
+        if(type==="types.xml")parsed=parseTypesXML(content);
+        else if(type==="events.xml")parsed=parseEventsXML(content);
+        else if(type==="globals.xml")parsed=parseGlobalsXML(content);
+        else if(type==="cfgplayerspawnpoints.xml")parsed=parsePlayerSpawnsXML(content);
+      }catch{parsed=content;}
+      onLoad({filename:file.name,type,parsed,raw:content});
+    };
+    reader.readAsText(file);
+  };
+  return(
+    <div style={{display:"flex",height:"100%",background:T.bg,alignItems:"center",justifyContent:"center",flexDirection:"column"}}>
+      <div style={{marginBottom:40,textAlign:"center"}}>
+        <div style={{fontFamily:T.display,fontSize:26,color:T.accent,letterSpacing:6,marginBottom:6}}>DAYZ CONFIG</div>
+        <div style={{fontFamily:T.mono,fontSize:11,color:T.textDim,letterSpacing:3}}>NITRADO SERVER FILE EDITOR</div>
+      </div>
+      <div onClick={()=>ref.current.click()} onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
+        onDrop={e=>{e.preventDefault();setDrag(false);if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]);}}
+        style={{width:440,height:170,border:`2px dashed ${drag?T.accent:T.borderBright}`,borderRadius:14,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"pointer",background:drag?"rgba(200,168,75,0.04)":"rgba(255,255,255,0.01)",transition:"all .2s"}}>
+        <div style={{fontSize:36,marginBottom:10}}>📂</div>
+        <div style={{fontFamily:T.mono,fontSize:13,color:T.text}}>Drop any DayZ config file here</div>
+        <div style={{fontFamily:T.mono,fontSize:10,color:T.textDim,marginTop:6}}>or click to browse · .xml · .json · .cfg</div>
+      </div>
+      <input ref={ref} type="file" accept=".xml,.json,.cfg" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0]);}}/>
+      <div style={{marginTop:32,display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,maxWidth:540}}>
+        {Object.entries(FILE_DEFS).filter(([k])=>k!=="other").map(([k,v])=>(
+          <div key={k} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
+            <div style={{fontSize:16,marginBottom:4}}>{v.icon}</div>
+            <div style={{fontFamily:T.mono,fontSize:10,color:T.text}}>{v.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ───────────────────────────────────────────────────────
+function App(){
+  const [apiKey,setApiKey]=useState(()=>localStorage.getItem(LS_API_KEY)||"");
+  const [proxyUrl,setProxyUrl]=useState(()=>localStorage.getItem(LS_PROXY_URL)||"");
+  const [showApiSetup,setShowApiSetup]=useState(()=>{const k=localStorage.getItem(LS_API_KEY); return !k||k==="";});
+  const [showSettings,setShowSettings]=useState(false);
+  const [files,setFiles]=useState([]);
+  const [activeFile,setActiveFile]=useState(null);
+  const [tab,setTab]=useState("editor");
+
+  const handleApiSave=(key,proxy)=>{setApiKey(key);setProxyUrl(proxy);setShowApiSetup(false);};
+  const handleApiSkip=()=>{localStorage.setItem(LS_API_KEY,"__skipped__");setShowApiSetup(false);};
+
+  const handleLoad=useCallback(({filename,type,parsed,raw})=>{
+    const entry={filename,type,items:Array.isArray(parsed)?deepClone(parsed):parsed,originals:Array.isArray(parsed)?deepClone(parsed):parsed,origRaw:raw};
+    setFiles(prev=>{const idx=prev.findIndex(f=>f.filename===filename);return idx>=0?prev.map((f,i)=>i===idx?entry:f):[...prev,entry];});
+    setActiveFile(filename);setTab("editor");
+  },[]);
+
+  const handleChange=useCallback((filename,name,field,value)=>{
+    setFiles(prev=>prev.map(f=>{
+      if(f.filename!==filename)return f;
+      if(typeof f.items==="string")return{...f,items:value};
+      return{...f,items:f.items.map(item=>{
+        if(item.name!==name)return item;
+        if(field?.startsWith("flags."))return{...item,flags:{...item.flags,[field.split(".")[1]]:value}};
+        return{...item,[field]:value};
+      })};
+    }));
+  },[]);
+  const handleGlobalChange=useCallback((filename,name,field,value)=>{
+    setFiles(prev=>prev.map(f=>f.filename!==filename?f:{...f,items:f.items.map(i=>i.name===name?{...i,[field]:value}:i)}));
+  },[]);
+  const handleSpawnChange=useCallback((filename,id,field,value)=>{
+    setFiles(prev=>prev.map(f=>f.filename!==filename?f:{...f,items:f.items.map(i=>i.id===id?{...i,[field]:value}:i)}));
+  },[]);
+  const handleSpawnAdd=useCallback(filename=>{
+    setFiles(prev=>prev.map(f=>{if(f.filename!==filename)return f;const newId=Math.max(0,...f.items.map(i=>i.id))+1;return{...f,items:[...f.items,{id:newId,x:"0",z:"0",a:"0",r:"20"}]};}));
+  },[]);
+  const handleSpawnDelete=useCallback((filename,id)=>{
+    setFiles(prev=>prev.map(f=>f.filename!==filename?f:{...f,items:f.items.filter(i=>i.id!==id)}));
+  },[]);
+  const handleBulkApply=useCallback((filename,edits)=>{
+    setFiles(prev=>prev.map(f=>{
+      if(f.filename!==filename)return f;
+      const map={};edits.forEach(({name,field,value})=>{if(!map[name])map[name]={};map[name][field]=value;});
+      return{...f,items:f.items.map(item=>map[item.name]?{...item,...map[item.name]}:item)};
+    }));
+  },[]);
+
+  const handleExport=filename=>{
+    const f=files.find(x=>x.filename===filename);if(!f)return;
+    let content=f.items;
+    if(typeof content!=="string"){
+      if(f.type==="types.xml")content=serializeTypesXML(f.items);
+      else if(f.type==="events.xml")content=serializeEventsXML(f.items);
+      else if(f.type==="globals.xml")content=serializeGlobalsXML(f.items);
+      else if(f.type==="cfgplayerspawnpoints.xml")content=serializePlayerSpawnsXML(f.items);
+      else content=JSON.stringify(f.items,null,2);
+    }
+    dl(content,filename);
+  };
+  const handleReset=filename=>{
+    if(!confirm("Reset all changes to this file?"))return;
+    setFiles(prev=>prev.map(f=>f.filename!==filename?f:{...f,items:deepClone(f.originals??f.items)}));
+  };
+  const handleRemoveFile=filename=>{
+    setFiles(prev=>prev.filter(f=>f.filename!==filename));
+    if(activeFile===filename){const rem=files.filter(f=>f.filename!==filename);setActiveFile(rem[0]?.filename??null);}
+  };
+
+  const getChangeCount=f=>{
+    if(!f||!Array.isArray(f.items))return(f?.items!==f?.origRaw)?1:0;
+    return f.items.filter(item=>JSON.stringify(item)!==JSON.stringify(f.originals?.find(o=>o.name===item.name))).length;
+  };
+
+  const cur=files.find(f=>f.filename===activeFile);
+  const def=cur?(FILE_DEFS[cur.type]||FILE_DEFS["other"]):null;
+  const cc=cur?getChangeCount(cur):0;
+  const aiConnected=!!apiKey&&apiKey!=="__skipped__";
+
+  return(
+    <div style={{display:"flex",height:"100vh",background:T.bg,color:T.text,flexDirection:"column"}}>
+
+      {/* Modals */}
+      {showApiSetup&&<ApiKeyModal onSave={handleApiSave} onSkip={handleApiSkip}/>}
+      {showSettings&&<SettingsModal apiKey={apiKey} proxyUrl={proxyUrl} onSave={(k,p)=>{setApiKey(k);setProxyUrl(p);}} onClose={()=>setShowSettings(false)}/>}
+
+      {/* Top Bar */}
+      <div style={{display:"flex",alignItems:"center",height:48,borderBottom:`1px solid ${T.border}`,background:T.panel,paddingLeft:16,paddingRight:12,gap:10,flexShrink:0,overflow:"hidden"}}>
+        <span style={{fontFamily:T.display,fontSize:13,color:T.accent,letterSpacing:4,flexShrink:0}}>DAYZ</span>
+        <span style={{fontFamily:T.mono,fontSize:9,color:T.textDim,letterSpacing:2,marginRight:4,flexShrink:0}}>CONFIG</span>
+
+        {/* File tabs */}
+        <div style={{display:"flex",gap:4,flex:1,overflow:"hidden"}}>
+          {files.map(f=>{
+            const d=FILE_DEFS[f.type]||FILE_DEFS["other"];
+            const cnt=getChangeCount(f);const isAct=f.filename===activeFile;
+            return(
+              <div key={f.filename} onClick={()=>setActiveFile(f.filename)} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,background:isAct?T.surface:"transparent",border:`1px solid ${isAct?T.borderBright:"transparent"}`,cursor:"pointer",maxWidth:180,flexShrink:0}}>
+                <span style={{fontSize:12}}>{d.icon}</span>
+                <span style={{fontFamily:T.mono,fontSize:10,color:isAct?T.textBright:T.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.filename}</span>
+                {cnt>0&&<span style={{fontFamily:T.mono,fontSize:9,color:T.green}}>●</span>}
+                <span onClick={e=>{e.stopPropagation();handleRemoveFile(f.filename);}} style={{fontFamily:T.mono,fontSize:11,color:T.textDim,cursor:"pointer",marginLeft:2}}>✕</span>
+              </div>
+            );
+          })}
+        </div>
+
+        <Btn onClick={()=>{setFiles([]);setActiveFile(null);}} small ghost>+ Load</Btn>
+
+        {cur&&<>
+          {["editor","diff","ai"].map(t=>(
+            <button key={t} onClick={()=>setTab(t)} style={{background:tab===t?T.surface:"transparent",border:`1px solid ${tab===t?T.borderBright:"transparent"}`,borderRadius:6,padding:"4px 12px",fontFamily:T.mono,fontSize:10,color:tab===t?T.accent:T.textDim,cursor:"pointer",letterSpacing:1,flexShrink:0}}>
+              {t==="editor"?"EDITOR":t==="diff"?`CHANGES${cc>0?` (${cc})`:""}`:t==="ai"?"AI":""}
+            </button>
+          ))}
+          <Btn onClick={()=>handleReset(cur.filename)} small variant="danger">RESET</Btn>
+          <Btn onClick={()=>handleExport(cur.filename)} small variant="accent">EXPORT</Btn>
+        </>}
+
+        {/* AI status + settings */}
+        <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+          {apiKey&&apiKey!=="__skipped__"&&(
+            <div title="AI connected" style={{width:8,height:8,borderRadius:"50%",background:T.green,flexShrink:0}}/>
+          )}
+          <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:"transparent",border:"none",cursor:"pointer",fontFamily:T.mono,fontSize:14,color:T.textDim,padding:"2px 4px"}}>⚙️</button>
+        </div>
+      </div>
+
+      {/* Info bar */}
+      {cur&&(
+        <div style={{display:"flex",alignItems:"center",height:30,borderBottom:`1px solid ${T.border}`,background:T.panel,paddingLeft:16,gap:10,flexShrink:0}}>
+          <span>{def?.icon}</span>
+          <span style={{fontFamily:T.mono,fontSize:10,color:T.textBright}}>{cur.filename}</span>
+          <span style={{fontFamily:T.mono,fontSize:10,color:T.textDim}}>·</span>
+          <span style={{fontFamily:T.mono,fontSize:10,color:T.textDim}}>{def?.desc}</span>
+          {Array.isArray(cur.items)&&<span style={{fontFamily:T.mono,fontSize:10,color:T.textDim}}>· {cur.items.length} entries</span>}
+          {cc>0&&<Tag color={T.green}>● {cc} modified</Tag>}
+        </div>
+      )}
+
+      {/* Content */}
+      <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+        {!cur?(
+          <LoadScreen onLoad={handleLoad}/>
+        ):tab==="ai"?(
+          <AIChat fileType={cur.type} items={cur.items} onBulkApply={edits=>handleBulkApply(cur.filename,edits)} apiKey={apiKey} proxyUrl={proxyUrl}/>
+        ):tab==="diff"?(
+          <div style={{flex:1,overflow:"auto"}}><DiffPanel items={cur.items} originals={cur.originals}/></div>
+        ):cur.type==="types.xml"?(
+          <TypesEditor items={cur.items} originals={cur.originals} onChange={(n,f,v)=>handleChange(cur.filename,n,f,v)}/>
+        ):cur.type==="events.xml"?(
+          <EventsEditor items={cur.items} originals={cur.originals} onChange={(n,f,v)=>handleChange(cur.filename,n,f,v)}/>
+        ):cur.type==="globals.xml"?(
+          <GlobalsEditor items={cur.items} originals={cur.originals} onChange={(n,f,v)=>handleGlobalChange(cur.filename,n,f,v)}/>
+        ):cur.type==="cfgplayerspawnpoints.xml"?(
+          <PlayerSpawnsEditor items={cur.items} originals={cur.originals}
+            onChange={(id,f,v)=>handleSpawnChange(cur.filename,id,f,v)}
+            onAdd={()=>handleSpawnAdd(cur.filename)}
+            onDelete={id=>handleSpawnDelete(cur.filename,id)}/>
+        ):(
+          <RawEditor content={typeof cur.items==="string"?cur.items:JSON.stringify(cur.items,null,2)} onChange={v=>handleChange(cur.filename,null,null,v)}/>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+<!-- ── Cloudflare Worker Code (copy this into your Worker) ──────────
+paste the following into a new Cloudflare Worker at workers.cloudflare.com:
+
+export default {
+  async fetch(request, env) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, x-api-key, anthropic-version",
+        },
+      });
+    }
+    const body = await request.json();
+    const apiKey = request.headers.get("x-api-key");
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    return new Response(JSON.stringify(data), {
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  },
+};
+-->
+</body>
+</html>
